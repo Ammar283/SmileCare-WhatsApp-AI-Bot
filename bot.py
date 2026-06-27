@@ -7,20 +7,14 @@ import re
 
 app = Flask(__name__)
 
-# ============================================================
-# CONFIGURATION — reads from Railway environment variables
-# Set these in Railway → your service → Variables tab
-# ============================================================
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY", "")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Groq model — free, fast, great for WhatsApp bots
 GROQ_MODEL   = "llama3-8b-8192"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-# ============================================================
 
 SYSTEM_PROMPT = """You are the AI WhatsApp assistant for SmileCare Dental Clinic in Karachi, Pakistan.
 
@@ -60,11 +54,9 @@ Payment: Cash, EasyPaisa, JazzCash accepted. No insurance.
 4. If customer seems ready to book, ask for their name and WhatsApp number.
 5. Be warm and friendly — this is a healthcare business."""
 
-# Conversation history per user phone number
 conversations = {}
 
 def get_groq_reply(user_phone, user_message):
-    """Call Groq API and return AI reply."""
     if user_phone not in conversations:
         conversations[user_phone] = []
 
@@ -73,7 +65,6 @@ def get_groq_reply(user_phone, user_message):
         "content": user_message
     })
 
-    # Keep last 10 messages only
     history = conversations[user_phone][-10:]
 
     headers = {
@@ -88,7 +79,13 @@ def get_groq_reply(user_phone, user_message):
         "temperature": 0.7
     }
 
+    print(f"[GROQ] Calling API with model={GROQ_MODEL}, key_prefix={GROQ_API_KEY[:8] if GROQ_API_KEY else 'NOT SET'}")
+
     response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=15)
+
+    print(f"[GROQ] Status code: {response.status_code}")
+    print(f"[GROQ] Response: {response.text[:300]}")
+
     response.raise_for_status()
 
     reply = response.json()["choices"][0]["message"]["content"].strip()
@@ -101,7 +98,6 @@ def get_groq_reply(user_phone, user_message):
     return reply
 
 def send_telegram_alert(sender_phone, message):
-    """Alert you on Telegram when a lead shares their number."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
@@ -114,33 +110,45 @@ def send_telegram_alert(sender_phone, message):
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=5)
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"[TELEGRAM] Error: {e}")
 
 def has_phone_number(message):
-    """Detect Pakistani phone numbers in a message."""
     pattern = r'(\+92|0092|0)?[3][0-9]{9}'
     return bool(re.search(pattern, message))
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Twilio sends every incoming WhatsApp message here."""
     incoming_msg = request.values.get("Body", "").strip()
     sender       = request.values.get("From", "")
     sender_phone = sender.replace("whatsapp:", "")
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] FROM: {sender_phone} | MSG: {incoming_msg}")
+    print(f"[WEBHOOK] From: {sender_phone} | Message: {incoming_msg}")
+    print(f"[ENV CHECK] GROQ_API_KEY set: {bool(GROQ_API_KEY)} | starts with: {GROQ_API_KEY[:8] if GROQ_API_KEY else 'EMPTY'}")
 
     if not incoming_msg:
         return str(MessagingResponse())
 
+    # Safety check — if key missing, say so clearly in logs
+    if not GROQ_API_KEY:
+        print("[ERROR] GROQ_API_KEY is not set in Railway Variables!")
+        resp = MessagingResponse()
+        resp.message("Bot config error: API key missing. Admin has been notified.")
+        return str(resp)
+
     try:
         reply = get_groq_reply(sender_phone, incoming_msg)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] REPLY: {reply[:80]}...")
+        print(f"[SUCCESS] Reply: {reply[:100]}")
+    except requests.exceptions.HTTPError as e:
+        print(f"[ERROR] HTTP error from Groq: {e}")
+        print(f"[ERROR] Response body: {e.response.text if e.response else 'no response'}")
+        reply = "Sorry, I am having a technical issue. Please call us at 0300-0000000."
+    except requests.exceptions.Timeout:
+        print("[ERROR] Groq API timed out")
+        reply = "Sorry, response took too long. Please try again or call 0300-0000000."
     except Exception as e:
-        print(f"Groq error: {e}")
-        reply = "Sorry, I am having a technical issue right now. Please call us at 0300-0000000 or try again shortly."
+        print(f"[ERROR] Unexpected error: {type(e).__name__}: {e}")
+        reply = "Sorry, I am having a technical issue. Please call us at 0300-0000000."
 
-    # Telegram alert if lead shares a phone number
     if has_phone_number(incoming_msg):
         send_telegram_alert(sender_phone, incoming_msg)
 
@@ -150,15 +158,41 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def health():
-    """Health check — visit your Railway URL to confirm bot is running."""
-    status = {
-        "status": "live",
-        "groq_key_set": bool(GROQ_API_KEY),
-        "twilio_sid_set": bool(TWILIO_ACCOUNT_SID),
-        "telegram_set": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
-        "model": GROQ_MODEL
-    }
-    return str(status), 200
+    return (
+        f"status: live | "
+        f"groq_key: {'SET (' + GROQ_API_KEY[:8] + '...)' if GROQ_API_KEY else 'MISSING'} | "
+        f"twilio: {'SET' if TWILIO_ACCOUNT_SID else 'MISSING'} | "
+        f"model: {GROQ_MODEL}"
+    ), 200
+
+@app.route("/test-groq", methods=["GET"])
+def test_groq():
+    """Visit /test-groq in browser to test the Groq API directly."""
+    if not GROQ_API_KEY:
+        return "ERROR: GROQ_API_KEY not set in Railway Variables", 500
+    try:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user",   "content": "Reply with exactly: Groq is working!"}
+            ],
+            "max_tokens": 20
+        }
+        response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=15)
+        print(f"[TEST] Groq status: {response.status_code}")
+        print(f"[TEST] Groq response: {response.text}")
+        if response.status_code == 200:
+            reply = response.json()["choices"][0]["message"]["content"]
+            return f"Groq API working! Response: {reply}", 200
+        else:
+            return f"Groq API error {response.status_code}: {response.text}", 500
+    except Exception as e:
+        return f"Exception: {type(e).__name__}: {e}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
