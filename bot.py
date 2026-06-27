@@ -8,23 +8,19 @@ import re
 app = Flask(__name__)
 
 # ============================================================
-# CONFIGURATION — fill these in before running
+# CONFIGURATION — reads from Railway environment variables
+# Set these in Railway → your service → Variables tab
 # ============================================================
-GROQ_API_KEY        = ""        # console.groq.com (free)
-TWILIO_ACCOUNT_SID  = ""
-TWILIO_AUTH_TOKEN   = " "
-TELEGRAM_BOT_TOKEN  = ""
-TELEGRAM_CHAT_ID    = ""
+GROQ_API_KEY       = os.environ.get("GROQ_API_KEY", "")
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Groq model — all free, llama is best for chat
-GROQ_MODEL = "llama3-8b-8192"
-# Other free options:
-# "llama3-70b-8192"      — smarter, slightly slower
-# "mixtral-8x7b-32768"   — great for long conversations
-# "gemma2-9b-it"         — good multilingual (Urdu/English)
-# ============================================================
-
+# Groq model — free, fast, great for WhatsApp bots
+GROQ_MODEL   = "llama3-8b-8192"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+# ============================================================
 
 SYSTEM_PROMPT = """You are the AI WhatsApp assistant for SmileCare Dental Clinic in Karachi, Pakistan.
 
@@ -61,24 +57,23 @@ Payment: Cash, EasyPaisa, JazzCash accepted. No insurance.
 1. Never quote prices not listed above.
 2. For unknown services say: "Please call us at 0300-0000000 for details."
 3. Always end with a follow-up question to keep the conversation going.
-4. If customer seems ready to book, ask: "Can I get your name and WhatsApp number so our team can call you?"
+4. If customer seems ready to book, ask for their name and WhatsApp number.
 5. Be warm and friendly — this is a healthcare business."""
 
-# Conversation history per user (phone number -> list of messages)
+# Conversation history per user phone number
 conversations = {}
 
 def get_groq_reply(user_phone, user_message):
-    """Send message to Groq API and get AI reply."""
+    """Call Groq API and return AI reply."""
     if user_phone not in conversations:
         conversations[user_phone] = []
 
-    # Add user message to history
     conversations[user_phone].append({
         "role": "user",
         "content": user_message
     })
 
-    # Keep last 10 messages to stay within token limits
+    # Keep last 10 messages only
     history = conversations[user_phone][-10:]
 
     headers = {
@@ -88,19 +83,16 @@ def get_groq_reply(user_phone, user_message):
 
     payload = {
         "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ] + history,
+        "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + history,
         "max_tokens": 300,
         "temperature": 0.7
     }
 
     response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=15)
     response.raise_for_status()
-    data = response.json()
-    reply = data["choices"][0]["message"]["content"].strip()
 
-    # Save assistant reply to history
+    reply = response.json()["choices"][0]["message"]["content"].strip()
+
     conversations[user_phone].append({
         "role": "assistant",
         "content": reply
@@ -109,14 +101,15 @@ def get_groq_reply(user_phone, user_message):
     return reply
 
 def send_telegram_alert(sender_phone, message):
-    """Send instant lead notification to your Telegram."""
+    """Alert you on Telegram when a lead shares their number."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
     try:
         text = (
             f"New WhatsApp Lead!\n\n"
             f"Phone: {sender_phone}\n"
             f"Message: {message}\n"
-            f"Time: {datetime.now().strftime('%d %b %Y, %H:%M')}\n\n"
-            f"Reply: wa.me/{sender_phone.replace('+', '')}"
+            f"Time: {datetime.now().strftime('%d %b %Y, %H:%M')}"
         )
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=5)
@@ -124,29 +117,30 @@ def send_telegram_alert(sender_phone, message):
         print(f"Telegram error: {e}")
 
 def has_phone_number(message):
-    """Check if message contains a Pakistani phone number."""
+    """Detect Pakistani phone numbers in a message."""
     pattern = r'(\+92|0092|0)?[3][0-9]{9}'
     return bool(re.search(pattern, message))
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Twilio calls this endpoint when a WhatsApp message arrives."""
+    """Twilio sends every incoming WhatsApp message here."""
     incoming_msg = request.values.get("Body", "").strip()
     sender       = request.values.get("From", "")
     sender_phone = sender.replace("whatsapp:", "")
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {sender_phone}: {incoming_msg}")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] FROM: {sender_phone} | MSG: {incoming_msg}")
 
     if not incoming_msg:
         return str(MessagingResponse())
 
     try:
         reply = get_groq_reply(sender_phone, incoming_msg)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] REPLY: {reply[:80]}...")
     except Exception as e:
         print(f"Groq error: {e}")
-        reply = "Sorry, I am having a technical issue. Please call us at 0300-0000000 or try again in a moment."
+        reply = "Sorry, I am having a technical issue right now. Please call us at 0300-0000000 or try again shortly."
 
-    # If message has a phone number in it, treat as a lead and alert via Telegram
+    # Telegram alert if lead shares a phone number
     if has_phone_number(incoming_msg):
         send_telegram_alert(sender_phone, incoming_msg)
 
@@ -156,7 +150,15 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def health():
-    return "SmileCare WhatsApp Bot is live!", 200
+    """Health check — visit your Railway URL to confirm bot is running."""
+    status = {
+        "status": "live",
+        "groq_key_set": bool(GROQ_API_KEY),
+        "twilio_sid_set": bool(TWILIO_ACCOUNT_SID),
+        "telegram_set": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "model": GROQ_MODEL
+    }
+    return str(status), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
