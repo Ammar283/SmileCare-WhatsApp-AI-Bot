@@ -10,11 +10,11 @@ app = Flask(__name__)
 # ============================================================
 # CONFIGURATION — fill these in before running
 # ============================================================
-GROQ_API_KEY        = "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"        # console.groq.com (free)
-TWILIO_ACCOUNT_SID  = "AC5f0e5afe24d116ace4d5245e48d2b709"
-TWILIO_AUTH_TOKEN   = "c00e9a8cbb38b705ae35aad03c148157 "
-TELEGRAM_BOT_TOKEN  = "AAGyl20yfF2tJCp0PTuIOd9Eg-cJ0mRXVUI"
-TELEGRAM_CHAT_ID    = "8765556797"
+GROQ_API_KEY        = ""        # console.groq.com (free)
+TWILIO_ACCOUNT_SID  = ""
+TWILIO_AUTH_TOKEN   = " "
+TELEGRAM_BOT_TOKEN  = ""
+TELEGRAM_CHAT_ID    = ""
 
 # Groq model — all free, llama is best for chat
 GROQ_MODEL = "llama3-8b-8192"
